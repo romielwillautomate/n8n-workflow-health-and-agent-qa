@@ -80,7 +80,7 @@ The failure rate looks at the last `HEARTBEAT_SAMPLE_SIZE` runs (default 20) fro
      -H "Authorization: Bearer YOUR_HEARTBEAT_SECRET"
    ```
 
-   The answer lists what was checked and which problems are open, for example `{"ok":true,"source":"check now","checked":5,"open":[...],"new":[...],"resolved":[]}`. New problems also go to Slack, once.
+   The answer lists what was checked and which problems are open, for example `{"ok":true,"source":"check now","slackPosted":true,"checked":5,"open":[...],"new":[...],"resolved":[]}`. New problems also go to Slack, once.
 3. After that it runs every 5 minutes. Change the interval in the **Schedule: Every 5 Minutes** node. Keep it shorter than your smallest `max_silence_minutes`.
 
 Two things the heartbeat depends on:
