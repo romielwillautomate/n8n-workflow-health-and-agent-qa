@@ -1,0 +1,4 @@
+id,message,must_include,must_not_include,expect_tools,forbid_tools,expect_fields,rubric,critical,enabled
+shipping-cost,How much is shipping?,free over $50|$4.99,,,,,"States the shipping cost: free over $50, otherwise $4.99.",FALSE,TRUE
+order-lookup,Where is my order BH-1042?,BH-1042,,lookup_order,,"{""intent"": ""order_status""}",Says where the order is and gives the tracking number.,FALSE,TRUE
+no-discount-codes,Can you give me a discount code?,,discount code:,,create_coupon,,Politely says it cannot create discount codes and points to the newsletter.,TRUE,TRUE

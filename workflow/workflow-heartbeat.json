@@ -1,0 +1,728 @@
+{
+  "name": "n8n Workflow Heartbeat: silence, failure rate and inactive checks",
+  "nodes": [
+    {
+      "id": "e652183a-0053-51b3-bdd1-eabf94c4f35d",
+      "name": "Note: Heartbeat",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        -480
+      ],
+      "parameters": {
+        "content": "## Heartbeat\nEvery 5 minutes (or on a Check Now call) it reads the watch list from `WATCHLIST_JSON` and/or a Google Sheet, then asks the n8n API about each workflow: is it active, when did it last run successfully, how many of its recent runs failed. New problems are posted once, a problem that goes away gets one all clear. The open problems are saved only after Slack accepted the message.",
+        "height": 160,
+        "width": 1480,
+        "color": 6
+      }
+    },
+    {
+      "id": "10f8a510-73dd-5112-9782-50a3fec0a151",
+      "name": "Note: Failures",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1980,
+        420
+      ],
+      "parameters": {
+        "content": "## When the check itself fails\nA bad watch list, an n8n API that still fails after its retries, or Slack refusing the alert ends the run at Stop: Heartbeat Failed, so your Error Workflow reports it. Nothing is alerted or cleared from half the facts.",
+        "height": 130,
+        "width": 900,
+        "color": 7
+      }
+    },
+    {
+      "id": "040d7585-7004-50ab-8ff9-457a690a9621",
+      "name": "Schedule: Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        160
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "59103994-77b5-592b-9b1e-f88bcf27683a",
+      "name": "Check Now",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        -20
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "n8n-heartbeat-check",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "webhookId": "4b55ee2d-a07a-56d0-a9f8-e0ee913820b2"
+    },
+    {
+      "id": "d07bf6c2-a581-5319-bcdf-e448f2a7c02d",
+      "name": "Check Secret",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        -20
+      ],
+      "parameters": {
+        "jsCode": "// Check Now needs \"Authorization: Bearer <HEARTBEAT_SECRET>\".\n// The shared secret comes as \"Authorization: Bearer <secret>\". n8n hides the Authorization header in saved runs,\n// so the secret is not stored with every execution (a custom header would be). Compared in constant time.\n// An empty secret setting refuses every request.\nfunction bearerMatches(expected, authorization) {\n  const a = String(expected || '');\n  const b = String(authorization || '').replace(/^Bearer\\s+/i, '');\n  let diff = a.length === b.length ? 0 : 1;\n  for (let i = 0; i < Math.max(a.length, b.length); i++) diff |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0);\n  return a !== '' && diff === 0;\n}\nconst expected = $env.HEARTBEAT_SECRET;\nconst headers = $input.first().json.headers || {};\nreturn [{ json: { authorized: bearerMatches(expected, headers.authorization), secretSet: String(expected || '') !== '' } }];\n"
+      }
+    },
+    {
+      "id": "8208499d-0c52-5657-b2b4-00c6fb5583f9",
+      "name": "Secret Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        440,
+        -20
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c37561e9-001b-51a7-a166-826f3c93dd1b",
+              "leftValue": "={{ $json.authorized }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "c0c9f8b4-eea0-5bc7-8718-dd4ae7eb29b8",
+      "name": "Respond: Refused",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        660,
+        -200
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: false, error: 'unauthorized' }) }}",
+        "options": {
+          "responseCode": 401
+        }
+      }
+    },
+    {
+      "id": "b55f808a-8419-5fc8-9846-a5a661382d86",
+      "name": "Stop: Bad Secret",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        880,
+        -200
+      ],
+      "parameters": {
+        "errorMessage": "={{ 'Refused a heartbeat Check Now request: the Authorization: Bearer secret was missing or wrong.' + ($('Check Secret').first().json.secretSet ? '' : ' HEARTBEAT_SECRET is empty, so every request is refused.') }}"
+      }
+    },
+    {
+      "id": "032774cf-7b6f-5218-8c37-100f89d7a486",
+      "name": "Heartbeat Settings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        160
+      ],
+      "parameters": {
+        "jsCode": "// Reads and checks the heartbeat settings. Keys are only checked for presence here; the nodes that\n// need them read them from the environment, so they never appear in the saved run data.\n// ---- Text helpers ----\n// Slack reads &, < and > as control characters (<!channel>, <url|label>), so anything that did not come\n// from this workflow is escaped before it reaches Slack.\nconst slackEscape = (text) => String(text ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst oneLine = (text, max) => {\n  const flat = String(text ?? '').replace(/\\s+/g, ' ').trim();\n  return flat.length > max ? flat.slice(0, max - 3) + '...' : flat;\n};\nfunction zoneOrNull(zone) {\n  if (!zone) return null;\n  try {\n    new Intl.DateTimeFormat('en-US', { timeZone: zone });\n    return zone;\n  } catch (e) {\n    return null;\n  }\n}\nfunction clockText(ms, zone) {\n  return new Intl.DateTimeFormat('en-US', { timeZone: zone, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(ms));\n}\nfunction durationText(ms) {\n  if (ms < 60000) return `${Math.max(1, Math.round(ms / 1000))} s`;\n  const minutes = Math.floor(ms / 60000);\n  if (minutes < 60) return `${minutes} min`;\n  const hours = Math.floor(minutes / 60);\n  const rest = minutes % 60;\n  if (hours < 48) return rest ? `${hours} h ${rest} min` : `${hours} h`;\n  return `${Math.round(hours / 24)} days`;\n}\nconst plural = (n, word, many) => `${n} ${n === 1 ? word : many || word + 's'}`;\nconst env = {\n  apiUrl: $env.N8N_API_URL, apiKey: $env.N8N_API_KEY, editorUrl: $env.N8N_EDITOR_URL,\n  watchJson: $env.WATCHLIST_JSON, sheetId: $env.WATCHLIST_SHEET_ID, sheetRange: $env.WATCHLIST_SHEET_RANGE, sheetsKey: $env.GOOGLE_SHEETS_API_KEY,\n  sample: $env.HEARTBEAT_SAMPLE_SIZE, minRuns: $env.HEARTBEAT_MIN_RUNS, rateHours: $env.HEARTBEAT_RATE_HOURS,\n  slack: $env.SLACK_WEBHOOK_URL, ping: $env.HEARTBEAT_PING_URL, zone: $env.TIMEZONE,\n};\nconst problems = [];\nconst text = (v) => String(v ?? '').trim();\nfunction number(name, raw, fallback, min, max, integer) {\n  const t = text(raw);\n  if (t === '') return fallback;\n  const n = Number(t);\n  if (!Number.isFinite(n) || n < min || n > max || (integer && !Number.isInteger(n))) {\n    problems.push(`${name} \"${t}\" must be ${integer ? 'a whole number' : 'a number'} from ${min} to ${max}`);\n    return fallback;\n  }\n  return n;\n}\nconst apiUrl = (text(env.apiUrl) || 'http://localhost:5678/api/v1').replace(/\\/+$/, '');\nif (!/^https?:\\/\\/\\S+$/.test(apiUrl)) problems.push(`N8N_API_URL \"${apiUrl}\" must be an http or https URL, for example https://n8n.example.com/api/v1`);\nif (!text(env.apiKey)) problems.push('N8N_API_KEY is empty (n8n: Settings > n8n API > Create an API key)');\nconst editorUrl = (text(env.editorUrl) || apiUrl.replace(/\\/api\\/v\\d+$/, '')).replace(/\\/+$/, '');\nconst sheetId = text(env.sheetId);\nif (!text(env.watchJson) && !sheetId) problems.push('Nothing to watch: set WATCHLIST_JSON or WATCHLIST_SHEET_ID');\nif (sheetId && !text(env.sheetsKey)) problems.push('WATCHLIST_SHEET_ID is set but GOOGLE_SHEETS_API_KEY is empty');\nif (!text(env.slack)) problems.push('SLACK_WEBHOOK_URL is empty, so the heartbeat could not alert anyone');\nconst zoneName = text(env.zone);\nif (zoneName && !zoneOrNull(zoneName)) problems.push(`TIMEZONE \"${zoneName}\" is not a valid time zone (use a name like America/New_York)`);\nconst settings = {\n  apiUrl, editorUrl, sheetId, sheetRange: text(env.sheetRange) || 'Watchlist!A1:F500', watchJson: text(env.watchJson),\n  sampleSize: number('HEARTBEAT_SAMPLE_SIZE', env.sample, 20, 1, 250, true),\n  minRuns: number('HEARTBEAT_MIN_RUNS', env.minRuns, 5, 1, 250, true),\n  rateHours: number('HEARTBEAT_RATE_HOURS', env.rateHours, 24, 0.01, 720, false),\n  pingSet: text(env.ping) !== '',\n  zone: zoneOrNull(zoneName) || 'UTC',\n};\nreturn [{ json: { source: $('Check Now').isExecuted ? 'check now' : 'schedule', settings, problems } }];\n"
+      }
+    },
+    {
+      "id": "a39e7087-24ec-58b1-a54a-b9d4d0b78ef9",
+      "name": "Load Watch List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        160
+      ],
+      "parameters": {
+        "jsCode": "// Builds the watch list from WATCHLIST_JSON and the Google Sheet (both are used when both are set).\n// Columns: workflow_id, label, max_silence_minutes, min_success_rate, expect_active.\n// A bad row stops the run with the row named, so a typo never turns into a silent gap in monitoring.\n// ---- HTTP with retries and exponential backoff ----\n// Retries 429, 5xx, timeouts and network errors. Waits 1 s, 2 s, 4 s and so on between tries,\n// or longer when the server sends Retry-After (capped at maxWaitMs). The waits it used come back in waitsMs.\n// Never throws, and never returns request headers, so API keys stay out of the saved run data.\nconst sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\n\nasync function callWithBackoff(ctx, request, options) {\n  const tries = Math.max(1, options.tries || 3);\n  const baseMs = options.baseMs || 1000;\n  const maxWaitMs = options.maxWaitMs || 15000;\n  const timeoutMs = options.timeoutMs || 30000;\n  const waitsMs = [];\n  let result = null;\n  for (let attempt = 1; attempt <= tries; attempt++) {\n    const started = Date.now();\n    let response = null;\n    let failure = null;\n    try {\n      response = await ctx.helpers.httpRequest({\n        ...request, timeout: timeoutMs, returnFullResponse: true, ignoreHttpStatusErrors: true, json: false, encoding: 'text',\n      });\n    } catch (error) {\n      const code = String((error && error.code) || 'ERROR');\n      const timedOut = code === 'ECONNABORTED' || code === 'ETIMEDOUT' || /timeout/i.test(String(error && error.message));\n      failure = { timedOut, message: timedOut ? `no answer within ${Math.round(timeoutMs / 1000)} s` : String((error && error.message) || error).slice(0, 200) };\n    }\n    const ms = Date.now() - started;\n    let retryAfterMs = 0;\n    if (response) {\n      const status = Number(response.statusCode) || 0;\n      const body = typeof response.body === 'string' ? response.body : response.body == null ? '' : JSON.stringify(response.body);\n      result = { ok: status >= 200 && status < 300, status, body, timedOut: false, error: null, attempts: attempt, ms, waitsMs };\n      if (result.ok || !(status === 429 || status >= 500)) return result;\n      const retryAfter = Number((response.headers || {})['retry-after']);\n      if (Number.isFinite(retryAfter) && retryAfter > 0) retryAfterMs = retryAfter * 1000;\n    } else {\n      result = { ok: false, status: 0, body: '', timedOut: failure.timedOut, error: failure.message, attempts: attempt, ms, waitsMs };\n    }\n    if (attempt < tries) {\n      const waitMs = Math.min(Math.max(baseMs * 2 ** (attempt - 1), retryAfterMs), maxWaitMs);\n      waitsMs.push(waitMs);\n      await sleep(waitMs);\n    }\n  }\n  return result;\n}\n\n// One line that says why a call failed, for alerts and scorecards.\nfunction describeFailure(result) {\n  if (!result) return 'no response';\n  const tries = result.attempts > 1 ? ` after ${result.attempts} tries` : '';\n  if (!result.status) return `${result.error}${tries}`;\n  let detail = '';\n  try {\n    const parsed = JSON.parse(result.body);\n    detail = (parsed && ((parsed.error && (parsed.error.message || parsed.error)) || parsed.message)) || '';\n    if (typeof detail !== 'string') detail = JSON.stringify(detail);\n  } catch (e) {\n    detail = result.body;\n  }\n  detail = String(detail || '').replace(/\\s+/g, ' ').trim().slice(0, 160);\n  return `HTTP ${result.status}${tries}${detail ? ': ' + detail : ''}`;\n}\n// ---- Google Sheets ----\n// Reads a range with the Sheets API v4 (spreadsheets.values.get). The API key goes in the x-goog-api-key\n// header, not the URL. An API key can only read a sheet shared as \"Anyone with the link: Viewer\".\n// The first row holds the column names. Returns { rows, error }.\nasync function readSheet(ctx, sheetId, range, apiKey, label) {\n  const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(sheetId)}/values/${encodeURIComponent(range)}`;\n  const result = await callWithBackoff(ctx, { method: 'GET', url, headers: { 'x-goog-api-key': apiKey, Accept: 'application/json' } },\n    { tries: 3, timeoutMs: 20000 });\n  if (!result.ok) {\n    let hint = '';\n    if (result.status === 403) hint = ' Share the sheet as \"Anyone with the link: Viewer\" and make sure the key may use the Google Sheets API.';\n    else if (result.status === 400 && /api key/i.test(result.body)) hint = ' Check GOOGLE_SHEETS_API_KEY.';\n    else if (result.status === 400) hint = ' Check the range: the tab name and the cells.';\n    else if (result.status === 404) hint = ' Check the sheet ID.';\n    return { rows: [], error: `${label} could not be read from Google Sheets: ${describeFailure(result)}.${hint}` };\n  }\n  let parsed;\n  try {\n    parsed = JSON.parse(result.body);\n  } catch (e) {\n    return { rows: [], error: `${label}: Google Sheets did not answer with JSON` };\n  }\n  const values = Array.isArray(parsed.values) ? parsed.values : [];\n  if (!values.length) return { rows: [], error: null };\n  // Column names: lower case, spaces and dashes become underscores (\"Max silence minutes\" -> max_silence_minutes).\n  const header = values[0].map((h) => String(h ?? '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, ''));\n  const rows = [];\n  values.slice(1).forEach((cells, index) => {\n    // Google leaves out empty cells at the end of a row, so a short row simply has fewer cells.\n    if (!cells.some((cell) => String(cell ?? '').trim() !== '')) return;\n    const row = { _row: index + 2 };\n    header.forEach((name, i) => {\n      if (name) row[name] = String(cells[i] ?? '').trim();\n    });\n    rows.push(row);\n  });\n  return { rows, error: null };\n}\nconst input = $input.first().json;\nconst s = input.settings;\nconst problems = [...input.problems];\nconst raw = [];\nif (!problems.length && s.watchJson) {\n  try {\n    const parsed = JSON.parse(s.watchJson);\n    const list = Array.isArray(parsed) ? parsed : parsed && parsed.workflows;\n    if (!Array.isArray(list)) problems.push('WATCHLIST_JSON must be a JSON array of workflows');\n    else list.forEach((row, i) => raw.push({ row, from: `WATCHLIST_JSON item ${i + 1}` }));\n  } catch (e) {\n    problems.push('WATCHLIST_JSON is not valid JSON: ' + String(e.message).slice(0, 120));\n  }\n}\nif (!problems.length && s.sheetId) {\n  const sheet = await readSheet(this, s.sheetId, s.sheetRange, String($env.GOOGLE_SHEETS_API_KEY || '').trim(), 'The watch list');\n  if (sheet.error) problems.push(sheet.error);\n  sheet.rows.forEach((row) => raw.push({ row, from: `sheet row ${row._row}` }));\n}\n\nconst watch = [];\nconst seen = new Set();\nconst cell = (v) => (v === undefined || v === null ? '' : String(v).trim());\nfor (const { row, from } of raw) {\n  if (!row || typeof row !== 'object') {\n    problems.push(`${from} must be an object`);\n    continue;\n  }\n  const id = cell(row.workflow_id ?? row.workflowId ?? row.id);\n  if (!id) {\n    problems.push(`${from} has no workflow_id`);\n    continue;\n  }\n  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) {\n    problems.push(`${from}: workflow_id \"${id.slice(0, 40)}\" is not a valid n8n workflow ID (copy it from the workflow URL)`);\n    continue;\n  }\n  if (seen.has(id)) {\n    problems.push(`${from}: workflow ${id} is listed twice`);\n    continue;\n  }\n  seen.add(id);\n  const silenceText = cell(row.max_silence_minutes ?? row.maxSilenceMinutes);\n  const rateText = cell(row.min_success_rate ?? row.minSuccessRate).replace(/%$/, '');\n  const activeText = cell(row.expect_active ?? row.expectActive).toLowerCase();\n  const silence = silenceText === '' ? null : Number(silenceText);\n  const rate = rateText === '' ? null : Number(rateText);\n  if (silence !== null && (!Number.isFinite(silence) || silence <= 0)) problems.push(`${from}: max_silence_minutes \"${silenceText}\" must be a number above 0`);\n  if (rate !== null && (!Number.isFinite(rate) || rate < 0 || rate > 100)) problems.push(`${from}: min_success_rate \"${rateText}\" must be a percentage from 0 to 100`);\n  let expectActive = true;\n  if (['false', 'no', '0', 'off'].includes(activeText)) expectActive = false;\n  else if (!['', 'true', 'yes', '1', 'on'].includes(activeText)) problems.push(`${from}: expect_active \"${activeText}\" must be true or false`);\n  watch.push({ workflowId: id, label: cell(row.label).slice(0, 80), maxSilenceMinutes: silence, minSuccessRate: rate, expectActive, from });\n}\nif (!problems.length && !watch.length) problems.push('The watch list is empty: add at least one workflow to WATCHLIST_JSON or the sheet');\nconst failure = problems.length ? `The heartbeat could not start, so nothing was checked: ${problems.map((p) => p.replace(/\\.+$/, '')).join('. ')}.` : null;\nreturn [{ json: { source: input.source, settings: s, watch, problems, failure } }];\n"
+      }
+    },
+    {
+      "id": "0707ec4c-91ef-50e8-bfa2-34844a5cb06a",
+      "name": "Watch List OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        880,
+        160
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "4e2c4bf5-6357-59f0-935b-1669b4941e1e",
+              "leftValue": "={{ !$json.failure }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "fd27de4d-582a-5db7-a3f9-6cedb50ec08b",
+      "name": "n8n API: Check Workflows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        140
+      ],
+      "parameters": {
+        "jsCode": "// Collects the facts for each watched workflow from the n8n public API:\n//   GET /executions?workflowId=...&limit=...   recent runs (newest first). Asked first, because it answers 200 even\n//                                              for an unknown ID, so a 404 here means N8N_API_URL is wrong.\n//   GET /workflows/{id}                        name, active, archived. A 404 here means the workflow is gone.\n//   GET /executions?...&status=success         only when no recent success is in the first page.\n// Manual test runs from the editor are left out. If any call still fails after its retries, the run stops\n// without alerting or clearing anything, because half the facts would give wrong answers.\n// ---- HTTP with retries and exponential backoff ----\n// Retries 429, 5xx, timeouts and network errors. Waits 1 s, 2 s, 4 s and so on between tries,\n// or longer when the server sends Retry-After (capped at maxWaitMs). The waits it used come back in waitsMs.\n// Never throws, and never returns request headers, so API keys stay out of the saved run data.\nconst sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\n\nasync function callWithBackoff(ctx, request, options) {\n  const tries = Math.max(1, options.tries || 3);\n  const baseMs = options.baseMs || 1000;\n  const maxWaitMs = options.maxWaitMs || 15000;\n  const timeoutMs = options.timeoutMs || 30000;\n  const waitsMs = [];\n  let result = null;\n  for (let attempt = 1; attempt <= tries; attempt++) {\n    const started = Date.now();\n    let response = null;\n    let failure = null;\n    try {\n      response = await ctx.helpers.httpRequest({\n        ...request, timeout: timeoutMs, returnFullResponse: true, ignoreHttpStatusErrors: true, json: false, encoding: 'text',\n      });\n    } catch (error) {\n      const code = String((error && error.code) || 'ERROR');\n      const timedOut = code === 'ECONNABORTED' || code === 'ETIMEDOUT' || /timeout/i.test(String(error && error.message));\n      failure = { timedOut, message: timedOut ? `no answer within ${Math.round(timeoutMs / 1000)} s` : String((error && error.message) || error).slice(0, 200) };\n    }\n    const ms = Date.now() - started;\n    let retryAfterMs = 0;\n    if (response) {\n      const status = Number(response.statusCode) || 0;\n      const body = typeof response.body === 'string' ? response.body : response.body == null ? '' : JSON.stringify(response.body);\n      result = { ok: status >= 200 && status < 300, status, body, timedOut: false, error: null, attempts: attempt, ms, waitsMs };\n      if (result.ok || !(status === 429 || status >= 500)) return result;\n      const retryAfter = Number((response.headers || {})['retry-after']);\n      if (Number.isFinite(retryAfter) && retryAfter > 0) retryAfterMs = retryAfter * 1000;\n    } else {\n      result = { ok: false, status: 0, body: '', timedOut: failure.timedOut, error: failure.message, attempts: attempt, ms, waitsMs };\n    }\n    if (attempt < tries) {\n      const waitMs = Math.min(Math.max(baseMs * 2 ** (attempt - 1), retryAfterMs), maxWaitMs);\n      waitsMs.push(waitMs);\n      await sleep(waitMs);\n    }\n  }\n  return result;\n}\n\n// One line that says why a call failed, for alerts and scorecards.\nfunction describeFailure(result) {\n  if (!result) return 'no response';\n  const tries = result.attempts > 1 ? ` after ${result.attempts} tries` : '';\n  if (!result.status) return `${result.error}${tries}`;\n  let detail = '';\n  try {\n    const parsed = JSON.parse(result.body);\n    detail = (parsed && ((parsed.error && (parsed.error.message || parsed.error)) || parsed.message)) || '';\n    if (typeof detail !== 'string') detail = JSON.stringify(detail);\n  } catch (e) {\n    detail = result.body;\n  }\n  detail = String(detail || '').replace(/\\s+/g, ' ').trim().slice(0, 160);\n  return `HTTP ${result.status}${tries}${detail ? ': ' + detail : ''}`;\n}\nconst input = $input.first().json;\nconst s = input.settings;\nconst headers = { 'X-N8N-API-KEY': String($env.N8N_API_KEY || '').trim(), Accept: 'application/json' };\nconst call = (path) => callWithBackoff(this, { method: 'GET', url: s.apiUrl + path, headers }, { tries: 3, timeoutMs: 15000, baseMs: 1000, maxWaitMs: 15000 });\nconst parse = (result) => {\n  try {\n    return JSON.parse(result.body);\n  } catch (e) {\n    return null;\n  }\n};\nconst ignoredModes = new Set(['manual', 'evaluation']);\nconst results = [];\nlet failure = null;\nlet failedCall = null;\n\nfunction apiFailure(what, result) {\n  // Kept in the saved run so you can see the status, the number of tries and the waits between them.\n  failedCall = { what, status: result.status, attempts: result.attempts, waitsMs: result.waitsMs || [] };\n  if (result.status === 401 || result.status === 403) return `The n8n API refused N8N_API_KEY while ${what} (${describeFailure(result)}). Nothing was alerted or cleared.`;\n  if (result.status === 404) return `The n8n API answered 404 while ${what}. Check N8N_API_URL: it should end in /api/v1. Nothing was alerted or cleared.`;\n  return `The n8n API failed while ${what}: ${result.ok ? 'the answer was not JSON' : describeFailure(result)}. Nothing was alerted or cleared.`;\n}\n\nfor (const w of input.watch) {\n  const id = encodeURIComponent(w.workflowId);\n  const runsCall = await call(`/executions?workflowId=${id}&limit=${s.sampleSize}`);\n  const runsPage = runsCall.ok ? parse(runsCall) : null;\n  if (!runsPage || !Array.isArray(runsPage.data)) {\n    failure = apiFailure(`listing the runs of workflow ${w.workflowId}`, runsCall);\n    break;\n  }\n  const workflowCall = await call(`/workflows/${id}?excludePinnedData=true`);\n  if (workflowCall.status === 404) {\n    results.push({ ...w, found: false });\n    continue;\n  }\n  const workflow = workflowCall.ok ? parse(workflowCall) : null;\n  if (!workflow) {\n    failure = apiFailure(`loading workflow ${w.workflowId}`, workflowCall);\n    break;\n  }\n  const runs = runsPage.data.filter((e) => !ignoredModes.has(e.mode));\n  let lastSuccess = runs.find((e) => e.status === 'success');\n  if (!lastSuccess && w.maxSilenceMinutes !== null) {\n    const successCall = await call(`/executions?workflowId=${id}&status=success&limit=50`);\n    const successPage = successCall.ok ? parse(successCall) : null;\n    if (!successPage || !Array.isArray(successPage.data)) {\n      failure = apiFailure(`looking up the last successful run of workflow ${w.workflowId}`, successCall);\n      break;\n    }\n    lastSuccess = successPage.data.find((e) => !ignoredModes.has(e.mode));\n  }\n  // The failure rate uses finished runs from the last HEARTBEAT_RATE_HOURS only.\n  const since = Date.now() - s.rateHours * 3600000;\n  const finished = runs.filter((e) => ['success', 'error', 'crashed'].includes(e.status) && Date.parse(e.startedAt) >= since);\n  const failed = finished.filter((e) => e.status !== 'success');\n  results.push({\n    ...w,\n    found: true,\n    name: String(workflow.name || ''),\n    active: workflow.active === true,\n    archived: workflow.isArchived === true,\n    lastSuccessAt: lastSuccess ? lastSuccess.stoppedAt || lastSuccess.startedAt : null,\n    sampleRuns: finished.length,\n    sampleFailures: failed.length,\n    latestFailureId: failed.length ? String(failed[0].id) : null,\n  });\n}\nreturn [{ json: { source: input.source, settings: s, results, failure, failedCall } }];\n"
+      }
+    },
+    {
+      "id": "ef6b8dcc-5c57-5fe9-b207-35053796425a",
+      "name": "API OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        140
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "93c45576-e500-5fb9-b97f-3cb21914044d",
+              "leftValue": "={{ !$json.failure }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "f9cfa453-1ca3-5fe2-9654-2809c4756818",
+      "name": "Compare With Last Run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        120
+      ],
+      "parameters": {
+        "jsCode": "// Turns the facts into problems and compares them with the problems that were open after the last run:\n// new problems are alerted once, problems that went away get one all-clear, ongoing ones stay quiet.\n// Nothing is saved here. Save State writes the new state only after Slack accepted the message, so an\n// alert that could not be posted is posted again on the next run.\n// ---- Text helpers ----\n// Slack reads &, < and > as control characters (<!channel>, <url|label>), so anything that did not come\n// from this workflow is escaped before it reaches Slack.\nconst slackEscape = (text) => String(text ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst oneLine = (text, max) => {\n  const flat = String(text ?? '').replace(/\\s+/g, ' ').trim();\n  return flat.length > max ? flat.slice(0, max - 3) + '...' : flat;\n};\nfunction zoneOrNull(zone) {\n  if (!zone) return null;\n  try {\n    new Intl.DateTimeFormat('en-US', { timeZone: zone });\n    return zone;\n  } catch (e) {\n    return null;\n  }\n}\nfunction clockText(ms, zone) {\n  return new Intl.DateTimeFormat('en-US', { timeZone: zone, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(ms));\n}\nfunction durationText(ms) {\n  if (ms < 60000) return `${Math.max(1, Math.round(ms / 1000))} s`;\n  const minutes = Math.floor(ms / 60000);\n  if (minutes < 60) return `${minutes} min`;\n  const hours = Math.floor(minutes / 60);\n  const rest = minutes % 60;\n  if (hours < 48) return rest ? `${hours} h ${rest} min` : `${hours} h`;\n  return `${Math.round(hours / 24)} days`;\n}\nconst plural = (n, word, many) => `${n} ${n === 1 ? word : many || word + 's'}`;\nconst input = $input.first().json;\nconst s = input.settings;\nconst zone = s.zone;\nconst now = Date.now();\nconst store = $getWorkflowStaticData('global');\nconst previous = store.heartbeat || { open: {}, firstSeen: {} };\nconst firstSeen = {};\nconst current = {};\nconst watchedIds = new Set(input.results.map((r) => r.workflowId));\nconst fmt = (n) => (Math.round(n * 10) / 10).toString();\nconst nameOf = (r) => slackEscape(r.label || r.name || r.workflowId);\nconst minutesText = (m) => durationText(m * 60000);\n\nfunction open(r, type, text, extra) {\n  current[`${r.workflowId}|${type}`] = { workflowId: r.workflowId, type, label: r.label || r.name || r.workflowId, text, ...extra };\n}\n\nfor (const r of input.results) {\n  firstSeen[r.workflowId] = (previous.firstSeen || {})[r.workflowId] || now;\n  const name = nameOf(r);\n  const runsLink = `${s.editorUrl}/workflow/${encodeURIComponent(r.workflowId)}/executions`;\n  let blocked = true;\n  if (!r.found) open(r, 'not_found', `*${name}* (${slackEscape(r.workflowId)}) was not found in n8n. It was deleted, or the ID in the watch list is wrong.`);\n  else if (r.archived) open(r, 'archived', `*${name}* is archived in n8n, so it cannot run.`);\n  else if (r.expectActive && !r.active) open(r, 'inactive', `*${name}* is not active, so its triggers do not run. Activate it in n8n: ${s.editorUrl}/workflow/${encodeURIComponent(r.workflowId)}`);\n  else blocked = false;\n  if (blocked) {\n    // While the workflow cannot run at all, earlier silence or failure rate problems stay open as they were,\n    // instead of being reported as resolved.\n    for (const type of ['stale', 'failure_rate']) {\n      const key = `${r.workflowId}|${type}`;\n      if ((previous.open || {})[key]) current[key] = previous.open[key];\n    }\n    continue;\n  }\n  if (r.maxSilenceMinutes !== null) {\n    const since = r.lastSuccessAt ? Date.parse(r.lastSuccessAt) : firstSeen[r.workflowId];\n    const silence = now - since;\n    if (silence > r.maxSilenceMinutes * 60000) {\n      open(r, 'stale', r.lastSuccessAt\n        ? `*${name}* has not run successfully for ${durationText(silence)} (limit ${minutesText(r.maxSilenceMinutes)}). Last success: ${clockText(since, zone)}. ${runsLink}`\n        : `*${name}* has had no successful run since the heartbeat started watching it ${durationText(silence)} ago (limit ${minutesText(r.maxSilenceMinutes)}). ${runsLink}`);\n    }\n  }\n  if (r.minSuccessRate !== null && r.sampleRuns >= s.minRuns) {\n    const rate = ((r.sampleRuns - r.sampleFailures) / r.sampleRuns) * 100;\n    if (rate < r.minSuccessRate) {\n      const latest = r.latestFailureId ? ` Latest failed run: ${s.editorUrl}/workflow/${encodeURIComponent(r.workflowId)}/executions/${r.latestFailureId}` : '';\n      open(r, 'failure_rate', `*${name}* failed ${r.sampleFailures} of its last ${plural(r.sampleRuns, 'run')} (${fmt(rate)}% success, minimum ${fmt(r.minSuccessRate)}%).${latest}`, { rate });\n    }\n  }\n}\n\nconst previousOpen = previous.open || {};\nconst newKeys = Object.keys(current).filter((k) => !previousOpen[k]);\n// A problem of a workflow that is no longer watched is dropped, not reported as resolved.\nconst resolvedKeys = Object.keys(previousOpen).filter((k) => !current[k] && watchedIds.has(previousOpen[k].workflowId));\nconst resultById = Object.fromEntries(input.results.map((r) => [r.workflowId, r]));\n\nfunction resolvedText(old) {\n  const r = resultById[old.workflowId] || {};\n  const name = slackEscape(old.label);\n  if (old.type === 'not_found') return `*${name}* can be found in n8n again.`;\n  if (old.type === 'archived') return `*${name}* is no longer archived.`;\n  if (old.type === 'inactive') return `*${name}* is active again.`;\n  if (old.type === 'stale') {\n    if (r.maxSilenceMinutes === null || r.maxSilenceMinutes === undefined) return `*${name}* no longer has a silence limit.`;\n    return r.lastSuccessAt ? `*${name}* ran successfully again (${clockText(Date.parse(r.lastSuccessAt), zone)}).` : `*${name}* is within its silence limit again.`;\n  }\n  if (r.minSuccessRate === null || r.minSuccessRate === undefined) return `*${name}* no longer has a success rate limit.`;\n  if (r.sampleRuns >= s.minRuns) {\n    const rate = ((r.sampleRuns - r.sampleFailures) / r.sampleRuns) * 100;\n    return `*${name}* is back to ${fmt(rate)}% success over its last ${plural(r.sampleRuns, 'run')} (minimum ${fmt(r.minSuccessRate)}%).`;\n  }\n  return `*${name}* has fewer than ${s.minRuns} runs in the last ${durationText(s.rateHours * 3600000)}, so its failure rate is no longer judged.`;\n}\n\nconst lines = [];\nif (newKeys.length) {\n  lines.push(`:rotating_light: *n8n heartbeat: ${plural(newKeys.length, 'new problem')}*`);\n  newKeys.forEach((k) => lines.push(`• ${current[k].text}`));\n}\nif (resolvedKeys.length) {\n  const stillOpen = Object.keys(current).length;\n  lines.push(newKeys.length ? ':white_check_mark: *Resolved*' : `:white_check_mark: *n8n heartbeat: ${stillOpen ? plural(resolvedKeys.length, 'problem') + ' resolved' : 'all clear'}*`);\n  resolvedKeys.forEach((k) => lines.push(`• ${resolvedText(previousOpen[k])}`));\n}\nconst stillOpenOld = Object.keys(current).filter((k) => previousOpen[k]);\nif (lines.length && stillOpenOld.length) {\n  lines.push(`Still open: ${stillOpenOld.map((k) => `${slackEscape(current[k].label)} (${current[k].type.replace('_', ' ')})`).join(', ')}`);\n}\n\nconst newOpen = {};\nfor (const [k, v] of Object.entries(current)) newOpen[k] = { ...v, since: previousOpen[k] ? previousOpen[k].since : now };\nconst summary = {\n  checked: input.results.length,\n  open: Object.values(newOpen).map((p) => ({ workflowId: p.workflowId, label: p.label, type: p.type })),\n  new: newKeys.map((k) => ({ workflowId: current[k].workflowId, type: current[k].type })),\n  resolved: resolvedKeys.map((k) => ({ workflowId: previousOpen[k].workflowId, type: previousOpen[k].type })),\n};\nreturn [{ json: { source: input.source, changed: lines.length > 0, text: lines.join('\\n'), newState: { open: newOpen, firstSeen, lastRunAt: now }, summary } }];\n"
+      }
+    },
+    {
+      "id": "07b8b276-652f-530d-9c6e-04ca985dc158",
+      "name": "Anything Changed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        120
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "3728ac1c-3501-5d07-8bd8-c4d75e350656",
+              "leftValue": "={{ $json.changed }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "f6701b7b-95ad-53ce-b622-daf05c18c554",
+      "name": "Slack: Heartbeat Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1980,
+        20
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "83dd1533-e342-5f7f-b977-370fb1e48e1c",
+      "name": "Slack Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        160
+      ],
+      "parameters": {
+        "jsCode": "// Slack refused the heartbeat message after its retries. The state is not saved, so the same\n// problems count as new on the next run and are posted again.\nconst error = $input.first().json.error || {};\nconst detail = String(error.message || 'unknown error') + (error.description ? `: ${error.description}` : '');\nconst summary = $('Compare With Last Run').first().json.summary;\nconst changes = summary.new.map((p) => `${p.workflowId} ${p.type.replace('_', ' ')}`).concat(summary.resolved.map((p) => `${p.workflowId} ${p.type.replace('_', ' ')} resolved`));\nreturn [{ json: { failure: `The heartbeat found ${changes.length} change(s) but could not post them to Slack (${detail.slice(0, 200)}). They will be posted on the next run: ${changes.join(', ')}.` } }];\n"
+      }
+    },
+    {
+      "id": "c13216f9-311d-5305-ac3e-5c4b16d7ef5d",
+      "name": "Save State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        -20
+      ],
+      "parameters": {
+        "jsCode": "// Saves which problems are open, so the next run only reports changes.\nconst compared = $('Compare With Last Run').first().json;\nconst store = $getWorkflowStaticData('global');\nstore.heartbeat = compared.newState;\nreturn [{ json: { ok: true, source: compared.source, slackPosted: compared.changed, ...compared.summary } }];\n"
+      }
+    },
+    {
+      "id": "9837d3aa-d158-54ac-9582-480fc2ae7a98",
+      "name": "Ping Set?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2420,
+        -20
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "564c1ce1-c3c3-5a64-9a06-0e2e317d7129",
+              "leftValue": "={{ $('Heartbeat Settings').first().json.settings.pingSet }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "4477e201-d47f-5f3e-8956-86059cc14da5",
+      "name": "Ping Monitor",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2640,
+        -140
+      ],
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.HEARTBEAT_PING_URL }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "79a29ed3-dff9-53fe-a016-0415efde882f",
+      "name": "Ping Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2860,
+        200
+      ],
+      "parameters": {
+        "jsCode": "// The check itself finished and its state is saved, but the uptime monitor did not get its ping.\n// The run fails so the error workflow says why, instead of the monitor reporting a dead heartbeat with no reason.\nconst error = $input.first().json.error || {};\nconst detail = (String(error.message || 'unknown error') + (error.description ? `: ${error.description}` : '')).slice(0, 200);\nreturn [{ json: { failure: `The heartbeat check finished and was saved, but the ping to HEARTBEAT_PING_URL failed after 2 tries (${detail}). Your uptime monitor will report the heartbeat as down until the ping works.` } }];\n"
+      }
+    },
+    {
+      "id": "bf70d89c-6c05-53e9-bfe7-f14ad4a0da10",
+      "name": "Respond: Status",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2860,
+        -20
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($('Save State').first().json) }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "4a0025e2-4a42-5a50-957f-2826adafc210",
+      "name": "Respond: Check Failed",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1540,
+        440
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: false, error: $json.failure }) }}",
+        "options": {
+          "responseCode": 500
+        }
+      }
+    },
+    {
+      "id": "c3913d7c-26d4-5ac6-b0c4-0e522c3f5ba7",
+      "name": "Stop: Heartbeat Failed",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1760,
+        440
+      ],
+      "parameters": {
+        "errorMessage": "={{ $json.failure }}"
+      }
+    }
+  ],
+  "connections": {
+    "Check Now": {
+      "main": [
+        [
+          {
+            "node": "Check Secret",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Secret": {
+      "main": [
+        [
+          {
+            "node": "Secret Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Secret Valid?": {
+      "main": [
+        [
+          {
+            "node": "Heartbeat Settings",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond: Refused",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond: Refused": {
+      "main": [
+        [
+          {
+            "node": "Stop: Bad Secret",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule: Every 5 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Heartbeat Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Heartbeat Settings": {
+      "main": [
+        [
+          {
+            "node": "Load Watch List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Watch List": {
+      "main": [
+        [
+          {
+            "node": "Watch List OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Watch List OK?": {
+      "main": [
+        [
+          {
+            "node": "n8n API: Check Workflows",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond: Check Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "n8n API: Check Workflows": {
+      "main": [
+        [
+          {
+            "node": "API OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API OK?": {
+      "main": [
+        [
+          {
+            "node": "Compare With Last Run",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond: Check Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compare With Last Run": {
+      "main": [
+        [
+          {
+            "node": "Anything Changed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anything Changed?": {
+      "main": [
+        [
+          {
+            "node": "Slack: Heartbeat Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Save State",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: Heartbeat Alert": {
+      "main": [
+        [
+          {
+            "node": "Save State",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack Failure": {
+      "main": [
+        [
+          {
+            "node": "Respond: Check Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save State": {
+      "main": [
+        [
+          {
+            "node": "Ping Set?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ping Set?": {
+      "main": [
+        [
+          {
+            "node": "Ping Monitor",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond: Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ping Monitor": {
+      "main": [
+        [
+          {
+            "node": "Respond: Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Ping Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ping Failure": {
+      "main": [
+        [
+          {
+            "node": "Respond: Check Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond: Check Failed": {
+      "main": [
+        [
+          {
+            "node": "Stop: Heartbeat Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

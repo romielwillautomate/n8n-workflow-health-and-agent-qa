@@ -1,0 +1,453 @@
+{
+  "name": "n8n Error Alerts: Slack with repeat suppression",
+  "nodes": [
+    {
+      "id": "1ac6d78f-8a06-508c-b0d4-cc02e60e7a49",
+      "name": "Note: Error Alerts",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        -320
+      ],
+      "parameters": {
+        "content": "## Error alerts\nSet this workflow as the **Error Workflow** of every workflow you want watched, and keep it **active** (n8n 2.x skips an inactive error workflow). The first failure posts right away. The same workflow, node and message within `ALERT_REPEAT_WINDOW_MINUTES` is only counted.",
+        "height": 150,
+        "width": 1260,
+        "color": 6
+      }
+    },
+    {
+      "id": "d414a78a-9949-5a7e-953d-89c2853a1faa",
+      "name": "Note: Repeat Check",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -80,
+        380
+      ],
+      "parameters": {
+        "content": "## Repeat check\nEvery 5 minutes: for each error whose window has ended, one summary with the repeat count and the latest run, posted one at a time. A group is only forgotten after Slack accepted its message.",
+        "height": 130,
+        "width": 1260,
+        "color": 7
+      }
+    },
+    {
+      "id": "cb36099c-c7d3-5807-b478-1f77c1311788",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "7a0ed372-ee96-5824-b74f-ed66fb356aa8",
+      "name": "Read Error",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Reads the failed run from the Error Trigger and decides: post an alert now, or only count a repeat.\n// A repeat is the same workflow, the same node and the same message (numbers, ids and times ignored)\n// within ALERT_REPEAT_WINDOW_MINUTES of the first alert. The repeat check posts one summary per window.\n// ---- Text helpers ----\n// Slack reads &, < and > as control characters (<!channel>, <url|label>), so anything that did not come\n// from this workflow is escaped before it reaches Slack.\nconst slackEscape = (text) => String(text ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst oneLine = (text, max) => {\n  const flat = String(text ?? '').replace(/\\s+/g, ' ').trim();\n  return flat.length > max ? flat.slice(0, max - 3) + '...' : flat;\n};\nfunction zoneOrNull(zone) {\n  if (!zone) return null;\n  try {\n    new Intl.DateTimeFormat('en-US', { timeZone: zone });\n    return zone;\n  } catch (e) {\n    return null;\n  }\n}\nfunction clockText(ms, zone) {\n  return new Intl.DateTimeFormat('en-US', { timeZone: zone, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(ms));\n}\nfunction durationText(ms) {\n  if (ms < 60000) return `${Math.max(1, Math.round(ms / 1000))} s`;\n  const minutes = Math.floor(ms / 60000);\n  if (minutes < 60) return `${minutes} min`;\n  const hours = Math.floor(minutes / 60);\n  const rest = minutes % 60;\n  if (hours < 48) return rest ? `${hours} h ${rest} min` : `${hours} h`;\n  return `${Math.round(hours / 24)} days`;\n}\nconst plural = (n, word, many) => `${n} ${n === 1 ? word : many || word + 's'}`;\nconst env = {\n  slack: $env.SLACK_WEBHOOK_URL,\n  window: $env.ALERT_REPEAT_WINDOW_MINUTES,\n  zone: $env.TIMEZONE,\n  editor: $env.N8N_EDITOR_URL,\n};\nconst data = $input.first().json;\nconst now = Date.now();\nconst zone = zoneOrNull(String(env.zone || '').trim()) || 'UTC';\nconst windowRaw = String(env.window ?? '').trim();\nlet windowMinutes = windowRaw === '' ? 30 : Number(windowRaw);\nif (!Number.isFinite(windowMinutes) || windowMinutes < 0) windowMinutes = 30;\nconst windowText = durationText(windowMinutes * 60000);\n\nconst workflow = data.workflow || {};\nconst execution = data.execution || null;\nconst trigger = data.trigger || null;\nconst error = (execution ? execution.error : trigger && trigger.error) || {};\n\n// The node that failed. When the trigger itself fails there is no execution, only trigger.error.\nconst node = String((execution && execution.lastNodeExecuted) || (error.node && error.node.name) || (trigger ? 'the trigger' : 'unknown node'));\n\n// The message. n8n cuts Code node errors at the last colon (for example \"00Z [line 1]\"), so the full text\n// is taken from the first line of the stack when that line ends with the same words.\nlet message = String(error.message || (error.cause && error.cause.message) || error.name || 'No error message');\nconst stackLine = String(error.stack || '').split('\\n')[0];\nconst fromStack = stackLine.match(/^[A-Za-z]*Error: (.+)$/);\nconst shortMessage = message.replace(/\\s*\\[line \\d+\\]$/, '');\nif (fromStack && fromStack[1].length > shortMessage.length && fromStack[1].endsWith(shortMessage)) message = fromStack[1];\nif (error.description && !message.includes(String(error.description))) message += ': ' + error.description;\nif (error.httpCode && !/HTTP \\d{3}/.test(message)) message += ` (HTTP ${error.httpCode})`;\n\n// Repeats are grouped by a fingerprint that ignores ids, long numbers and timestamps,\n// so \"order 48213 failed\" and \"order 48214 failed\" count as the same problem.\nconst normalized = message.toLowerCase()\n  .replace(/\\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\b/g, '<id>')\n  .replace(/\\d{4}-\\d{2}-\\d{2}[t ]\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?(z|[+-]\\d{2}:?\\d{2})?/g, '<time>')\n  .replace(/\\b(?=[0-9a-z]*\\d)(?=[0-9a-z]*[a-z])[0-9a-z]{12,}\\b/g, '<id>')\n  .replace(/\\d{4,}/g, '#')\n  .replace(/\\s+/g, ' ').trim().slice(0, 400);\nlet hash = 2166136261;\nfor (const ch of `${node}\\n${normalized}`) hash = Math.imul(hash ^ ch.codePointAt(0), 16777619) >>> 0;\nconst key = `${workflow.id || workflow.name || 'unknown'}:${hash.toString(16)}`;\n\n// Links use N8N_EDITOR_URL when it is set. n8n's own execution.url is built from WEBHOOK_URL, which can be a\n// different address than the editor (for example a public webhook domain that only serves /webhook paths).\nconst editorBase = String(env.editor || '').trim().replace(/\\/+$/, '');\nlet url = '';\nif (execution) url = editorBase && workflow.id && execution.id ? `${editorBase}/workflow/${workflow.id}/executions/${execution.id}` : String(execution.url || '');\nelse if (editorBase && workflow.id) url = `${editorBase}/workflow/${workflow.id}`;\n\nconst store = $getWorkflowStaticData('global');\nstore.alerts = store.alerts || {};\nconst alerts = store.alerts;\nlet entry = alerts[key];\nlet earlier = null;\nif (entry && now >= entry.windowEnds) {\n  // The window is over but the repeat check has not summed it up yet: carry its count into this alert.\n  earlier = { count: entry.sent ? entry.count - entry.reported : entry.count, sent: entry.sent, firstAt: entry.firstAt, lastAt: entry.lastAt };\n  delete alerts[key];\n  entry = null;\n}\nlet action;\nif (!entry) {\n  entry = alerts[key] = {\n    workflowId: String(workflow.id || ''), workflowName: String(workflow.name || 'Unknown workflow'), node, message,\n    firstAt: now, lastAt: now, windowEnds: now + windowMinutes * 60000, count: 1, reported: 0, sent: false, lastUrl: url,\n  };\n  action = 'alert';\n} else {\n  entry.count += 1;\n  entry.lastAt = now;\n  entry.message = message;\n  if (url) entry.lastUrl = url;\n  // Only post again if the first alert never reached Slack.\n  action = entry.sent ? 'count' : 'alert';\n}\n// Keep the memory small: drop the oldest groups beyond 300.\nconst keys = Object.keys(alerts);\nif (keys.length > 300) keys.sort((a, b) => alerts[a].lastAt - alerts[b].lastAt).slice(0, keys.length - 300).forEach((k) => delete alerts[k]);\n\nconst lines = [`:rotating_light: *${slackEscape(entry.workflowName)}* failed at *${slackEscape(node)}*`, slackEscape(oneLine(message, 700))];\nif (entry.count > 1) lines.push(`Failed ${entry.count} times since ${clockText(entry.firstAt, zone)} (${zone}). The first alert could not be posted.`);\nif (earlier && earlier.count > 0) {\n  // Those failures can be much older than the window (for example while Slack was down), so give their times.\n  if (earlier.sent) lines.push(`It also failed ${plural(earlier.count, 'more time')} after the last alert, the latest at ${clockText(earlier.lastAt, zone)} (${zone}), and that was not summed up yet.`);\n  else if (earlier.count === 1) lines.push(`It also failed once before, at ${clockText(earlier.firstAt, zone)} (${zone}), and that alert could not be posted.`);\n  else lines.push(`It also failed ${earlier.count} times before, between ${clockText(earlier.firstAt, zone)} and ${clockText(earlier.lastAt, zone)} (${zone}), and that alert could not be posted.`);\n}\nif (execution && execution.retryOf) lines.push(`This run was a retry of execution ${slackEscape(execution.retryOf)}.`);\nlines.push(url || (trigger ? 'The trigger failed before a run started, so there is no execution to open.' : 'No link: n8n did not save this run.'));\nif (windowMinutes > 0 && entry.count === 1) lines.push(`Repeats of this error in the next ${windowText} are counted and summed up in one follow-up.`);\n\nif (!String(env.slack || '').trim()) action = 'no_slack';\nreturn [{ json: { action, key, text: lines.join('\\n'), workflowName: entry.workflowName, node, message, count: entry.count, executionId: execution ? String(execution.id || '') : '' } }];\n"
+      }
+    },
+    {
+      "id": "51cd5b27-fb6f-545a-a10d-04fa8240b4c7",
+      "name": "Route Alert",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        480,
+        0
+      ],
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "b4f0740a-5b8c-5c87-af6f-9c10c1c06c29",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "alert",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "alert"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "0fe99aff-69f4-54d6-8f59-6075d9918c78",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "count",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "count"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "65eb06bf-37a3-5999-9f8b-1a5def690e08",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "no_slack",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "no_slack"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "none"
+        }
+      }
+    },
+    {
+      "id": "c242bd1d-348a-5e7c-b552-79349bd1b3cd",
+      "name": "Slack: Error Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        740,
+        -120
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "2c945068-e33a-5bcc-8520-3b76cdb23a6b",
+      "name": "Mark Sent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        -140
+      ],
+      "parameters": {
+        "jsCode": "// The alert reached Slack: later repeats in this window are only counted.\nconst item = $('Read Error').first().json;\nconst store = $getWorkflowStaticData('global');\nconst entry = (store.alerts || {})[item.key];\nif (entry) {\n  entry.sent = true;\n  entry.reported = entry.count;\n}\nreturn [{ json: { posted: true, key: item.key, count: item.count } }];\n"
+      }
+    },
+    {
+      "id": "590c4f97-df81-5b75-a165-148eb3809aa4",
+      "name": "Stop: Slack Failed",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        20
+      ],
+      "parameters": {
+        "errorMessage": "={{ 'The error alert for ' + $('Read Error').first().json.workflowName + ' (failed at ' + $('Read Error').first().json.node + ') could not be posted to Slack: ' + (($json.error && $json.error.message) || 'unknown error') + '. It stays queued and is posted with the next repeat or by the repeat check.' }}"
+      }
+    },
+    {
+      "id": "bf0ca25a-3883-5338-a688-f64be90aff30",
+      "name": "Repeat Counted",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        740,
+        60
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "b7f83c92-94a3-5862-8c73-818f9c005f7a",
+      "name": "Stop: No Slack",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        740,
+        220
+      ],
+      "parameters": {
+        "errorMessage": "={{ 'SLACK_WEBHOOK_URL is empty, so this alert went nowhere: ' + $json.workflowName + ' failed at ' + $json.node + ': ' + $json.message }}"
+      }
+    },
+    {
+      "id": "6f8d4167-67c4-5190-84f7-fc7ee60f409b",
+      "name": "Schedule: Repeat Check",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        600
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "0f52919c-1a22-5380-aae3-eb2d6997779b",
+      "name": "Check Repeats",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        600
+      ],
+      "parameters": {
+        "jsCode": "// Runs on a schedule. For every error group whose window has ended:\n// - repeats after the first alert: one summary with the count and the latest run,\n// - first alert never posted (Slack was down): post it now, with the count,\n// - nothing more to say: forget the group.\n// Groups are only removed after Slack accepted the message (Mark Summary Sent).\n// ---- Text helpers ----\n// Slack reads &, < and > as control characters (<!channel>, <url|label>), so anything that did not come\n// from this workflow is escaped before it reaches Slack.\nconst slackEscape = (text) => String(text ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst oneLine = (text, max) => {\n  const flat = String(text ?? '').replace(/\\s+/g, ' ').trim();\n  return flat.length > max ? flat.slice(0, max - 3) + '...' : flat;\n};\nfunction zoneOrNull(zone) {\n  if (!zone) return null;\n  try {\n    new Intl.DateTimeFormat('en-US', { timeZone: zone });\n    return zone;\n  } catch (e) {\n    return null;\n  }\n}\nfunction clockText(ms, zone) {\n  return new Intl.DateTimeFormat('en-US', { timeZone: zone, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(ms));\n}\nfunction durationText(ms) {\n  if (ms < 60000) return `${Math.max(1, Math.round(ms / 1000))} s`;\n  const minutes = Math.floor(ms / 60000);\n  if (minutes < 60) return `${minutes} min`;\n  const hours = Math.floor(minutes / 60);\n  const rest = minutes % 60;\n  if (hours < 48) return rest ? `${hours} h ${rest} min` : `${hours} h`;\n  return `${Math.round(hours / 24)} days`;\n}\nconst plural = (n, word, many) => `${n} ${n === 1 ? word : many || word + 's'}`;\nconst env = { slack: $env.SLACK_WEBHOOK_URL, zone: $env.TIMEZONE };\nconst zone = zoneOrNull(String(env.zone || '').trim()) || 'UTC';\nconst store = $getWorkflowStaticData('global');\nconst alerts = store.alerts || {};\nconst now = Date.now();\nconst out = [];\nfor (const [key, entry] of Object.entries(alerts)) {\n  if (now < entry.windowEnds) continue;\n  const name = slackEscape(entry.workflowName);\n  const node = slackEscape(entry.node);\n  const message = slackEscape(oneLine(entry.message, 700));\n  const day = (ms) => new Intl.DateTimeFormat('en-US', { timeZone: zone, month: 'short', day: 'numeric' }).format(new Date(ms));\n  const time = (ms) => new Intl.DateTimeFormat('en-US', { timeZone: zone, hour: 'numeric', minute: '2-digit' }).format(new Date(ms));\n  const span = day(entry.firstAt) === day(entry.lastAt)\n    ? `between ${time(entry.firstAt)} and ${time(entry.lastAt)} on ${day(entry.firstAt)} (${zone})`\n    : `between ${clockText(entry.firstAt, zone)} and ${clockText(entry.lastAt, zone)} (${zone})`;\n  if (!entry.sent) {\n    out.push({ key, kind: 'late alert', count: entry.count, text: [\n      `:rotating_light: *${name}* failed at *${node}*`,\n      message,\n      entry.count === 1\n        ? `Failed once, at ${clockText(entry.firstAt, zone)} (${zone}). The alert could not be posted when it happened.`\n        : `Failed ${entry.count} times ${span}. The alert could not be posted when it happened.`,\n      `Latest run: ${entry.lastUrl || 'no link'}`,\n    ].join('\\n') });\n    continue;\n  }\n  const more = entry.count - entry.reported;\n  if (more <= 0) {\n    delete alerts[key];\n    continue;\n  }\n  out.push({ key, kind: 'summary', count: entry.count, more, text: [\n    `:repeat: *${name}* failed at *${node}* ${plural(more, 'more time')} after the first alert, ${entry.count} in total ${span}.`,\n    message,\n    `Latest run: ${entry.lastUrl || 'no link'}`,\n  ].join('\\n') });\n}\nif (!String(env.slack || '').trim()) {\n  // Nowhere to post: forget the finished windows instead of piling them up.\n  out.forEach((o) => delete alerts[o.key]);\n  return [];\n}\nreturn out.map((json) => ({ json }));\n"
+      }
+    },
+    {
+      "id": "f9ccc7ad-cd84-59cc-8476-568c497ea93a",
+      "name": "Loop: Summaries",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        480,
+        600
+      ],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "2c8a3b4e-6b9a-54a8-a13c-75a154af1d95",
+      "name": "Slack: Repeat Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        740,
+        600
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.SLACK_WEBHOOK_URL }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "id": "4d213790-dcf5-5d6f-ab6c-ed26b82f0014",
+      "name": "Mark Summary Sent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        600
+      ],
+      "parameters": {
+        "jsCode": "// Slack accepted this summary: forget its group. The loop sends one summary per Slack call, so a refused summary is\n// retried on its own and never re-posts the others. If one is still refused, the run stops at Stop: Summary Failed\n// and the groups not posted yet stay for the next check.\nconst store = $getWorkflowStaticData('global');\nconst alerts = store.alerts || {};\nconst source = $('Loop: Summaries').first().json;\ndelete alerts[source.key];\nreturn [{ json: { posted: source.key, kind: source.kind } }];\n"
+      }
+    },
+    {
+      "id": "192a8da7-0ad5-5532-94b7-2419cef92a7b",
+      "name": "Stop: Summary Failed",
+      "type": "n8n-nodes-base.stopAndError",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        820
+      ],
+      "parameters": {
+        "errorMessage": "={{ 'A repeat summary could not be posted to Slack: ' + (($json.error && $json.error.message) || 'unknown error') + '. It is tried again at the next repeat check.' }}"
+      }
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Error": {
+      "main": [
+        [
+          {
+            "node": "Route Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Alert": {
+      "main": [
+        [
+          {
+            "node": "Slack: Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Repeat Counted",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop: No Slack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: Error Alert": {
+      "main": [
+        [
+          {
+            "node": "Mark Sent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop: Slack Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule: Repeat Check": {
+      "main": [
+        [
+          {
+            "node": "Check Repeats",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Repeats": {
+      "main": [
+        [
+          {
+            "node": "Loop: Summaries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Slack: Repeat Summary": {
+      "main": [
+        [
+          {
+            "node": "Mark Summary Sent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Stop: Summary Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop: Summaries": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Slack: Repeat Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Summary Sent": {
+      "main": [
+        [
+          {
+            "node": "Loop: Summaries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

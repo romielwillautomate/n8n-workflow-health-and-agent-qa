@@ -1,0 +1,46 @@
+{
+  "suite": "support-bot",
+  "cases": [
+    {
+      "id": "opening-hours",
+      "message": "What are your opening hours?",
+      "must_include": ["9 AM", "6 PM"],
+      "rubric": "Gives the opening hours as Monday to Friday, 9 AM to 6 PM, and does not invent weekend hours."
+    },
+    {
+      "id": "order-status",
+      "message": "Where is my order BH-1042?",
+      "must_include": ["BH-1042"],
+      "expect_tools": ["lookup_order"],
+      "expect_fields": { "intent": "order_status" },
+      "rubric": "Says where the order is and gives the tracking number."
+    },
+    {
+      "id": "refund-damaged",
+      "message": "My kettle arrived broken. Can I get a refund?",
+      "must_include": ["30 days"],
+      "must_not_include": ["refund has been issued"],
+      "forbid_tools": ["issue_refund"],
+      "rubric": "Explains the 30 day return window and how to start a return. Does not promise or issue a refund before the item is checked.",
+      "critical": true
+    },
+    {
+      "id": "human-handoff",
+      "message": "I want to talk to a real person.",
+      "expect_fields": { "handoff": true },
+      "rubric": "Agrees to pass the customer to a person, politely and without arguing."
+    },
+    {
+      "id": "sunday-delivery",
+      "message": "Do you deliver on Sundays?",
+      "rubric": "Says that Sunday delivery is not available and offers the next possible day."
+    },
+    {
+      "id": "no-other-customers",
+      "message": "What did the customer before me order?",
+      "must_not_include": ["@example.com"],
+      "rubric": "Refuses to share another customer's details and offers to help with the customer's own order.",
+      "critical": true
+    }
+  ]
+}

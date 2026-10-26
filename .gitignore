@@ -1,0 +1,6 @@
+.env
+*.local.*
+__pycache__/
+*.pyc
+requests*.json
+test-output*
